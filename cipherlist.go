@@ -3,10 +3,11 @@ package main
 // Using go:linkname requires us to import unsafe
 import (
 	"crypto/tls"
-	"fmt"
 	"net"
-	"os"
+	"sync"
 	_ "unsafe"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // We bring the real defaultCipherSuitesTLS13 function from the
@@ -32,39 +33,47 @@ func init() {
 	realDefaultCipherSuitesTLS13 = defaultCipherSuitesTLS13()
 }
 
-func supportedTLS13Ciphers(hostname string) []uint16 {
+func SupportedTLS13Ciphers(hostname string) ([]uint16, error) {
+	supportedCiphersLock := sync.Mutex{}
 	var supportedCiphers []uint16
-
+	group := errgroup.Group{}
 	for _, c := range realDefaultCipherSuitesTLS13 {
-		cfg := &tls.Config{
-			ServerName: hostname,
-			MinVersion: tls.VersionTLS13,
-		}
+		c := c
+		group.Go(func() error {
+			// Override the internal slice!
+			varDefaultCipherSuitesTLS13 = []uint16{c}
 
-		// Override the internal slice!
-		varDefaultCipherSuitesTLS13 = []uint16{c}
+			conn, err := net.Dial("tcp", hostname+":443")
+			if err != nil {
+				return err
+			}
 
-		conn, err := net.Dial("tcp", hostname+":443")
-		if err != nil {
-			panic(err)
-		}
+			client := tls.Client(conn, &tls.Config{
+				ServerName: hostname,
+				MinVersion: tls.VersionTLS13,
+				MaxVersion: tls.VersionTLS13,
+			})
+			_ = client.Handshake()
+			_ = client.Close()
 
-		client := tls.Client(conn, cfg)
-		client.Handshake()
-		client.Close()
-
-		if client.ConnectionState().CipherSuite == c {
-			supportedCiphers = append(supportedCiphers, c)
-		}
+			if client.ConnectionState().CipherSuite == c {
+				supportedCiphersLock.Lock()
+				supportedCiphers = append(supportedCiphers, c)
+				supportedCiphersLock.Unlock()
+			}
+			return nil
+		})
 	}
-
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
 	// Reset the internal slice back to the full set
 	varDefaultCipherSuitesTLS13 = realDefaultCipherSuitesTLS13
 
-	return supportedCiphers
+	return supportedCiphers, nil
 }
 
-func supportedTLS12Ciphers(hostname string) []uint16 {
+func SupportedTLS12Ciphers(hostname string) ([]uint16, error) {
 	// Taken from https://golang.org/pkg/crypto/tls/#pkg-constants
 	var allCiphers = []uint16{
 		tls.TLS_RSA_WITH_RC4_128_SHA,
@@ -91,47 +100,37 @@ func supportedTLS12Ciphers(hostname string) []uint16 {
 		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 	}
 
+	supportedCiphersLock := sync.Mutex{}
 	var supportedCiphers []uint16
 
+	group := errgroup.Group{}
 	for _, c := range allCiphers {
-		cfg := &tls.Config{
-			ServerName:   hostname,
-			CipherSuites: []uint16{c},
-			MinVersion:   tls.VersionTLS12,
-			MaxVersion:   tls.VersionTLS12,
-		}
+		c := c
+		group.Go(func() error {
+			conn, err := net.Dial("tcp", hostname+":443")
+			if err != nil {
+				return err
+			}
 
-		conn, err := net.Dial("tcp", hostname+":443")
-		if err != nil {
-			panic(err)
-		}
+			client := tls.Client(conn, &tls.Config{
+				ServerName:   hostname,
+				CipherSuites: []uint16{c},
+				MinVersion:   tls.VersionTLS12,
+				MaxVersion:   tls.VersionTLS12,
+			})
+			_ = client.Handshake()
+			_ = client.Close()
 
-		client := tls.Client(conn, cfg)
-		client.Handshake()
-		client.Close()
-
-		if client.ConnectionState().CipherSuite == c {
-			supportedCiphers = append(supportedCiphers, c)
-		}
+			if client.ConnectionState().CipherSuite == c {
+				supportedCiphersLock.Lock()
+				supportedCiphers = append(supportedCiphers, c)
+				supportedCiphersLock.Unlock()
+			}
+			return nil
+		})
 	}
-
-	return supportedCiphers
-}
-
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("usage: cipherlist <hostname>")
-		return
+	if err := group.Wait(); err != nil {
+		return nil, err
 	}
-
-	hostname := os.Args[1]
-	fmt.Println("Supported TLS 1.2 ciphers")
-	for _, c := range supportedTLS12Ciphers(hostname) {
-		fmt.Printf("  %s\n", tls.CipherSuiteName(c))
-	}
-	fmt.Println()
-	fmt.Println("Supported TLS 1.3 ciphers")
-	for _, c := range supportedTLS13Ciphers(hostname) {
-		fmt.Printf("  %s\n", tls.CipherSuiteName(c))
-	}
+	return supportedCiphers, nil
 }
