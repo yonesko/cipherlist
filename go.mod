@@ -1,4 +1,4 @@
-module github.com/joeshaw/cipherlist
+module github.com/yonesko/cipherlist
 
 go 1.14
 
