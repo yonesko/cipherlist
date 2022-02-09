@@ -1,4 +1,4 @@
-package main
+package cipherlist
 
 // Using go:linkname requires us to import unsafe
 import (
